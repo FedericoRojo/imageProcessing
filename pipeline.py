@@ -21,9 +21,12 @@ Uso típico:
 from __future__ import annotations
 
 import base64
+import difflib
 import functools
+import json
 import mimetypes
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -77,11 +80,84 @@ def get_client():
 # --------------------------------------------------------------------------
 
 class TablaBBox(BaseModel):
-    contiene_tabla: bool = Field(description="false si no se distingue una tabla clara")
+    # Con default en True: si el modelo devuelve las 4 coordenadas pero se come
+    # o escribe mal la bandera, igual aprovechamos el bbox.
+    contiene_tabla: bool = True
     x_min: float = Field(description="0-1000, borde izquierdo de la tabla de items")
     y_min: float = Field(description="0-1000, arranca en el encabezado de columnas")
     x_max: float
     y_max: float
+
+    def es_razonable(self, area_minima: float = 0.02) -> bool:
+        """Descarta bboxes degenerados (invertidos, vacíos o minúsculos)."""
+        ancho = self.x_max - self.x_min
+        alto = self.y_max - self.y_min
+        if ancho <= 0 or alto <= 0:
+            return False
+        return (ancho / 1000) * (alto / 1000) >= area_minima
+
+
+_CAMPOS = ("contiene_tabla", "x_min", "y_min", "x_max", "y_max")
+
+
+def _normalizar_claves(d: dict) -> dict:
+    """Tolera erratas del modelo: 'contene_tabla', 'xmin', 'X_MIN', etc.
+
+    Los modelos de visión chicos escriben mal las claves cada tantas llamadas.
+    Rechazar la respuesta entera por una letra sale más caro que mapearla.
+    """
+    salida = {}
+    for clave, valor in d.items():
+        k = str(clave).strip().lower().replace("-", "_").replace(" ", "_")
+        if k in _CAMPOS:
+            salida[k] = valor
+            continue
+        # 'xmin' -> 'x_min'
+        k2 = re.sub(r"^([xy])(min|max)$", r"\1_\2", k)
+        if k2 in _CAMPOS:
+            salida[k2] = valor
+            continue
+        cerca = difflib.get_close_matches(k, _CAMPOS, n=1, cutoff=0.72)
+        if cerca:
+            salida[cerca[0]] = valor
+    return salida
+
+
+def _parsear_bbox(raw: str, verbose: bool = True) -> TablaBBox | None:
+    """Texto crudo del modelo → TablaBBox, aguantando ruido alrededor."""
+    texto = raw.replace("```json", "").replace("```", "").strip()
+    m = re.search(r"\{.*\}", texto, re.S)     # el primer objeto JSON que aparezca
+    if not m:
+        if verbose:
+            print(f"[bbox] no hay JSON en la respuesta: {texto[:200]}")
+        return None
+    try:
+        crudo = json.loads(m.group())
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"[bbox] JSON inválido ({e}): {m.group()[:200]}")
+        return None
+
+    datos = _normalizar_claves(crudo)
+    faltan = [c for c in ("x_min", "y_min", "x_max", "y_max") if c not in datos]
+    if faltan:
+        if verbose:
+            print(f"[bbox] faltan coordenadas {faltan} en {crudo}")
+        return None
+
+    try:
+        bbox = TablaBBox.model_validate(datos)
+    except Exception as e:
+        if verbose:
+            print(f"[bbox] no valida: {e}")
+        return None
+
+    # el modelo a veces devuelve valores fuera de rango
+    bbox.x_min = max(0.0, min(1000.0, bbox.x_min))
+    bbox.y_min = max(0.0, min(1000.0, bbox.y_min))
+    bbox.x_max = max(0.0, min(1000.0, bbox.x_max))
+    bbox.y_max = max(0.0, min(1000.0, bbox.y_max))
+    return bbox
 
 
 PROMPT_BBOX = (
@@ -98,13 +174,11 @@ def _data_url(ruta: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(ruta.read_bytes()).decode()}"
 
 
-def detectar_tabla(ruta: str | Path, verbose: bool = True) -> TablaBBox | None:
-    """Imagen → LLM → bbox de la tabla. Devuelve None si no la encuentra."""
-    ruta = Path(ruta)
+def _pedir_bbox(ruta: Path, refuerzo: str = "") -> str:
     completion = get_client().chat.completions.create(
         model=MODELO_VISION,
         messages=[
-            {"role": "system", "content": PROMPT_BBOX},
+            {"role": "system", "content": PROMPT_BBOX + refuerzo},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": _data_url(ruta)}}
             ]},
@@ -113,21 +187,39 @@ def detectar_tabla(ruta: str | Path, verbose: bool = True) -> TablaBBox | None:
         temperature=0.0,
         extra_body={"top_k": 1, "chat_template_kwargs": {"enable_thinking": False}},
     )
+    return completion.choices[0].message.content.strip()
 
-    raw = completion.choices[0].message.content.strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    try:
-        bbox = TablaBBox.model_validate_json(raw)
-    except Exception:
-        if verbose:
-            print(f"[detectar_tabla] no pude parsear el bbox. Crudo: {raw[:200]}")
-        return None
 
-    if not bbox.contiene_tabla:
-        if verbose:
-            print("[detectar_tabla] el modelo dice que no hay tabla.")
-        return None
-    return bbox
+def detectar_tabla(ruta: str | Path, verbose: bool = True,
+                   reintentos: int = 1) -> TablaBBox | None:
+    """Imagen → LLM → bbox de la tabla. Devuelve None si no la encuentra."""
+    ruta = Path(ruta)
+    refuerzo = ""
+    for intento in range(reintentos + 1):
+        bbox = _parsear_bbox(_pedir_bbox(ruta, refuerzo), verbose=verbose)
+
+        if bbox is None:
+            refuerzo = ("\nATENCIÓN: usá EXACTAMENTE las claves contiene_tabla, "
+                        "x_min, y_min, x_max, y_max. Nada más.")
+            if verbose and intento < reintentos:
+                print("[detectar_tabla] reintento con las claves reforzadas...")
+            continue
+
+        if not bbox.contiene_tabla:
+            if verbose:
+                print("[detectar_tabla] el modelo dice que no hay tabla.")
+            return None
+
+        if not bbox.es_razonable():
+            if verbose:
+                print(f"[detectar_tabla] bbox descartado por chico o invertido: {bbox}")
+            refuerzo = ("\nEl recuadro anterior era inválido. Devolvé el rectángulo "
+                        "COMPLETO de la tabla de items.")
+            continue
+
+        return bbox
+
+    return None
 
 
 def _margenes(margen: float | tuple[float, float, float, float]):
@@ -167,7 +259,9 @@ def recortar_zoom(
     if borde:
         crop = ImageOps.expand(crop.convert("RGB"), border=int(borde), fill="white")
 
-    salida = ruta.with_stem(ruta.stem + "_tabla")
+    # PNG y no JPEG: es una imagen intermedia y recomprimir en JPEG le agrega
+    # ruido justo en los bordes de los caracteres, que es lo que lee el OCR.
+    salida = ruta.with_name(ruta.stem + "_tabla.png")
     crop.save(salida)
     return salida
 
