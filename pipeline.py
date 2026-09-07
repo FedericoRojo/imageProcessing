@@ -466,6 +466,38 @@ def imprimir_filas(filas: list[list[dict]]) -> None:
 # Diagnóstico
 # --------------------------------------------------------------------------
 
+def previsualizar_bbox(ruta: str | Path, rotacion: int = 0, verbose: bool = True):
+    """Dibuja sobre la imagen el recuadro que devolvió el LLM.
+
+    Sirve para ver qué seleccionó realmente antes de recortar: si agarró toda
+    la factura, si se comió el encabezado de columnas o si erró de zona.
+    Devuelve (imagen_anotada, bbox) — el bbox es None si no detectó nada.
+    """
+    from PIL import ImageDraw
+
+    ruta = normalizar_orientacion(ruta, rotacion=rotacion, verbose=verbose)
+    bbox = detectar_tabla(ruta, verbose=verbose)
+    img = Image.open(ruta).convert("RGB")
+    if bbox is None:
+        if verbose:
+            print("[previsualizar] el LLM no devolvió bbox")
+        return img, None
+
+    w, h = img.size
+    caja = (bbox.x_min / 1000 * w, bbox.y_min / 1000 * h,
+            bbox.x_max / 1000 * w, bbox.y_max / 1000 * h)
+    d = ImageDraw.Draw(img)
+    d.rectangle(caja, outline=(255, 0, 0), width=max(2, w // 300))
+
+    if verbose:
+        alto_rel = (bbox.y_max - bbox.y_min) / 10
+        print(f"[previsualizar] la tabla ocupa {alto_rel:.1f}% del alto de la imagen")
+        if alto_rel < 12:
+            print("  OJO: es una franja fina. El error relativo del modelo pesa "
+                  "mucho más acá; conviene subir el zoom o recortar primero la hoja.")
+    return img, bbox
+
+
 def cajas_en_borde(res, ruta_img: str | Path, umbral: int = 3) -> pd.DataFrame:
     """Cajas de texto que tocan el borde de la imagen.
 
