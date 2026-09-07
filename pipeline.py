@@ -88,13 +88,14 @@ class TablaBBox(BaseModel):
     x_max: float
     y_max: float
 
-    def es_razonable(self, area_minima: float = 0.02) -> bool:
-        """Descarta bboxes degenerados (invertidos, vacíos o minúsculos)."""
-        ancho = self.x_max - self.x_min
-        alto = self.y_max - self.y_min
-        if ancho <= 0 or alto <= 0:
-            return False
-        return (ancho / 1000) * (alto / 1000) >= area_minima
+    def es_razonable(self, ancho_min: float = 150.0, alto_min: float = 15.0) -> bool:
+        """Descarta bboxes degenerados (invertidos o vacíos).
+
+        El umbral va por ancho y alto y no por área: una tabla de un solo ítem
+        es legítimamente muy baja, y un criterio de área la descartaría.
+        """
+        return (self.x_max - self.x_min) >= ancho_min and \
+               (self.y_max - self.y_min) >= alto_min
 
 
 _CAMPOS = ("contiene_tabla", "x_min", "y_min", "x_max", "y_max")
@@ -167,6 +168,74 @@ PROMPT_BBOX = (
     "Respondé SOLO con este JSON, sin markdown ni texto adicional:\n"
     '{"contiene_tabla": true, "x_min": 0, "y_min": 0, "x_max": 1000, "y_max": 1000}'
 )
+
+
+# --------------------------------------------------------------------------
+# Paso 0 — orientación
+# --------------------------------------------------------------------------
+
+def normalizar_orientacion(ruta: str | Path, rotacion: int = 0,
+                           verbose: bool = True) -> Path:
+    """Deja la imagen con el texto derecho ANTES de que la vea nadie.
+
+    Las fotos de celular suelen venir con la etiqueta EXIF de orientación: el
+    visor de fotos la respeta, pero PIL y OpenCV leen los píxeles crudos. Así
+    que el archivo se ve derecho en el explorador y acostado en el pipeline.
+    Acá se aplica la rotación de una vez y se guarda un archivo nuevo, para que
+    el LLM y PaddleOCR vean exactamente lo mismo.
+
+    `rotacion` fuerza un giro extra en grados antihorarios (90, 180, 270) para
+    los casos en que la foto está girada y no trae EXIF.
+    """
+    ruta = Path(ruta)
+    img = Image.open(ruta)
+    original = img.size
+
+    img = ImageOps.exif_transpose(img)     # aplica la etiqueta EXIF si la hay
+    giro_exif = img.size != original
+
+    if rotacion % 360:
+        img = img.rotate(rotacion, expand=True)
+
+    if not giro_exif and not rotacion % 360:
+        return ruta                        # nada que hacer, uso el original
+
+    salida = ruta.with_name(ruta.stem + "_derecha.png")
+    img.convert("RGB").save(salida)
+    if verbose:
+        motivo = []
+        if giro_exif:
+            motivo.append("EXIF")
+        if rotacion % 360:
+            motivo.append(f"{rotacion}° manual")
+        print(f"[orientacion] {original} -> {img.size} por {' + '.join(motivo)}")
+    return salida
+
+
+def detectar_rotacion(ruta: str | Path, verbose: bool = True) -> int:
+    """Prueba las 4 orientaciones y devuelve la que el OCR lee con más confianza.
+
+    Para fotos giradas que NO traen EXIF. Cuesta 4 pasadas de OCR, así que se
+    usa sólo cuando `normalizar_orientacion` no alcanzó y el resultado vino mal.
+    """
+    import tempfile
+
+    base = ImageOps.exif_transpose(Image.open(ruta)).convert("RGB")
+    mejor, mejor_score = 0, -1.0
+    for ang in (0, 90, 180, 270):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            base.rotate(ang, expand=True).save(f.name)
+            res = get_ocr().predict(f.name)[0]
+        scores = list(res["rec_scores"])
+        # confianza media ponderada por cuánto texto encontró
+        score = (sum(scores) / len(scores)) * len(scores) ** 0.5 if scores else 0.0
+        if verbose:
+            print(f"[rotacion] {ang:3d}°: {len(scores)} cajas, score {score:.2f}")
+        if score > mejor_score:
+            mejor, mejor_score = ang, score
+    if verbose:
+        print(f"[rotacion] elegida: {mejor}°")
+    return mejor
 
 
 def _data_url(ruta: Path) -> str:
@@ -271,14 +340,15 @@ def preparar_tabla(
     margen: float | tuple[float, float, float, float] = MARGEN_DEFAULT,
     zoom: int = ZOOM_DEFAULT,
     borde: int = BORDE_DEFAULT,
+    rotacion: int = 0,
     verbose: bool = True,
 ) -> Path:
-    """Paso 1 completo: imagen → llm → tabla recortada.
+    """Paso 1 completo: imagen → orientación → llm → tabla recortada.
 
     Si el LLM no encuentra la tabla, devuelve la imagen original para que el
     pipeline siga funcionando igual.
     """
-    ruta = Path(ruta)
+    ruta = normalizar_orientacion(ruta, rotacion=rotacion, verbose=verbose)
     bbox = detectar_tabla(ruta, verbose=verbose)
     if bbox is None:
         if verbose:
@@ -450,9 +520,10 @@ def comparar_variantes(ruta: str | Path, variantes: dict[str, dict],
 # --------------------------------------------------------------------------
 
 def procesar(ruta: str | Path, margen=MARGEN_DEFAULT, zoom: int = ZOOM_DEFAULT,
-             borde: int = BORDE_DEFAULT):
+             borde: int = BORDE_DEFAULT, rotacion: int = 0):
     """Corre el pipeline entero y devuelve (img_tabla, res, filas, df)."""
-    img_tabla = preparar_tabla(ruta, margen=margen, zoom=zoom, borde=borde)
+    img_tabla = preparar_tabla(ruta, margen=margen, zoom=zoom, borde=borde,
+                               rotacion=rotacion)
     res = ocr_tabla(img_tabla)
     filas = agrupar_filas(res)
     return img_tabla, res, filas, filas_a_dataframe(filas)
