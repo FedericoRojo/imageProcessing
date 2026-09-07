@@ -1,0 +1,19 @@
+# imágenes de prueba y salidas del OCR
+data/*
+!data/.gitkeep
+output/
+output_table/
+*_tabla.jpeg
+*_tabla.jpg
+*_tabla.png
+*.xlsx
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# secrets
+.env

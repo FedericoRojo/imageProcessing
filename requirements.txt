@@ -1,0 +1,8 @@
+paddlepaddle
+paddleocr[all]
+openai
+pydantic>=2
+pillow
+numpy
+pandas
+lxml
