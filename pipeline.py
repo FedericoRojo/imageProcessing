@@ -88,14 +88,37 @@ class TablaBBox(BaseModel):
     x_max: float
     y_max: float
 
-    def es_razonable(self, ancho_min: float = 150.0, alto_min: float = 15.0) -> bool:
-        """Descarta bboxes degenerados (invertidos o vacíos).
+    @property
+    def ancho(self) -> float:
+        return self.x_max - self.x_min
 
-        El umbral va por ancho y alto y no por área: una tabla de un solo ítem
-        es legítimamente muy baja, y un criterio de área la descartaría.
+    @property
+    def alto(self) -> float:
+        return self.y_max - self.y_min
+
+    @property
+    def cobertura(self) -> float:
+        """Fracción de la imagen que cubre el recuadro (0 a 1)."""
+        return max(0.0, self.ancho / 1000) * max(0.0, self.alto / 1000)
+
+    def es_razonable(self, ancho_min: float = 150.0, alto_min: float = 15.0,
+                     cobertura_max: float = 0.90) -> tuple[bool, str]:
+        """Valida el recuadro por los dos extremos. Devuelve (ok, motivo).
+
+        - Muy chico o invertido: el modelo erró de zona.
+        - Casi toda la imagen: el modelo se rindió y devolvió el marco entero
+          (típicamente copiando el ejemplo del prompt). Recortar ahí no recorta
+          nada, así que es tan inútil como no detectar.
+
+        El umbral chico va por ancho y alto y no por área, porque una tabla de
+        un solo ítem es legítimamente muy baja.
         """
-        return (self.x_max - self.x_min) >= ancho_min and \
-               (self.y_max - self.y_min) >= alto_min
+        if self.ancho < ancho_min or self.alto < alto_min:
+            return False, f"muy chico o invertido ({self.ancho:.0f}x{self.alto:.0f})"
+        if self.cobertura > cobertura_max:
+            return False, (f"cubre el {self.cobertura*100:.0f}% de la imagen: "
+                           "es la imagen entera, no un recorte")
+        return True, "ok"
 
 
 _CAMPOS = ("contiene_tabla", "x_min", "y_min", "x_max", "y_max")
@@ -161,12 +184,24 @@ def _parsear_bbox(raw: str, verbose: bool = True) -> TablaBBox | None:
     return bbox
 
 
+# OJO con este prompt: la versión anterior traía un ejemplo con valores
+# concretos (0, 0, 1000, 1000) y el modelo lo copiaba textual cuando la tabla
+# le costaba, devolviendo la imagen entera. Los ejemplos con números son un
+# imán para los modelos chicos: van con marcadores de posición, no con valores.
 PROMPT_BBOX = (
     "Devolvé el bounding box de la tabla de items/productos de esta factura, "
-    "en coordenadas relativas 0-1000. Incluí la fila de encabezados de columna "
-    "pero NO el logo, los datos del proveedor ni el recuadro de totales.\n"
-    "Respondé SOLO con este JSON, sin markdown ni texto adicional:\n"
-    '{"contiene_tabla": true, "x_min": 0, "y_min": 0, "x_max": 1000, "y_max": 1000}'
+    "en coordenadas relativas 0-1000 (0 = borde superior o izquierdo, "
+    "1000 = borde inferior o derecho).\n"
+    "Incluí la fila de encabezados de columna. NO incluyas el logo, los datos "
+    "del proveedor, el bloque del cliente ni el recuadro de totales.\n"
+    "La tabla puede tener una sola fila y puede ser una franja fina y ancha: "
+    "eso es normal, devolvé igual su recuadro ajustado.\n"
+    "NO devuelvas el marco de la imagen completa: un recuadro que cubre casi "
+    "toda la imagen es una respuesta incorrecta.\n"
+    "Si de verdad no distinguís una tabla de items, poné contiene_tabla en false.\n"
+    "Respondé SOLO con un objeto JSON con esta forma, sin markdown ni texto:\n"
+    '{"contiene_tabla": <true|false>, "x_min": <numero>, "y_min": <numero>, '
+    '"x_max": <numero>, "y_max": <numero>}'
 )
 
 
@@ -279,15 +314,25 @@ def detectar_tabla(ruta: str | Path, verbose: bool = True,
                 print("[detectar_tabla] el modelo dice que no hay tabla.")
             return None
 
-        if not bbox.es_razonable():
+        ok, motivo = bbox.es_razonable()
+        if not ok:
             if verbose:
-                print(f"[detectar_tabla] bbox descartado por chico o invertido: {bbox}")
-            refuerzo = ("\nEl recuadro anterior era inválido. Devolvé el rectángulo "
-                        "COMPLETO de la tabla de items.")
+                print(f"[detectar_tabla] bbox descartado: {motivo}")
+            if bbox.cobertura > 0.90:
+                refuerzo = ("\nTu respuesta anterior fue el marco de la imagen entera, "
+                            "que no sirve. Mirá dónde están las filas de items con sus "
+                            "códigos y precios, y devolvé SÓLO ese rectángulo, ajustado. "
+                            "Si no distinguís la tabla, poné contiene_tabla en false.")
+            else:
+                refuerzo = ("\nEl recuadro anterior era demasiado chico. Devolvé el "
+                            "rectángulo COMPLETO de la tabla de items.")
             continue
 
         return bbox
 
+    if verbose:
+        print("[detectar_tabla] sin recuadro válido después de "
+              f"{reintentos + 1} intento(s)")
     return None
 
 
