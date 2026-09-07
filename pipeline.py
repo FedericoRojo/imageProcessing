@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
 # --------------------------------------------------------------------------
@@ -40,6 +40,13 @@ BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 MARGEN_DEFAULT = 0.02   # % del alto/ancho que se agrega alrededor del bbox
 ZOOM_DEFAULT = 2        # factor de ampliación del recorte
+BORDE_DEFAULT = 30      # px de borde blanco agregados DESPUÉS del zoom
+
+# Por qué el borde blanco: el detector de texto de PaddleOCR recorta las cajas
+# contra el límite de la imagen, y el preprocesador (unwarping) puede correr la
+# imagen unos píxeles. Cualquiera de las dos cosas se come el primer carácter de
+# la columna más a la izquierda. Con un borde blanco, ningún texto queda pegado
+# al borde y el problema desaparece.
 
 
 def _api_key() -> str:
@@ -123,23 +130,42 @@ def detectar_tabla(ruta: str | Path, verbose: bool = True) -> TablaBBox | None:
     return bbox
 
 
+def _margenes(margen: float | tuple[float, float, float, float]):
+    """Acepta un número (los 4 lados iguales) o (izq, arriba, der, abajo)."""
+    if isinstance(margen, (int, float)):
+        return (float(margen),) * 4
+    izq, arr, der, aba = margen
+    return float(izq), float(arr), float(der), float(aba)
+
+
 def recortar_zoom(
     ruta: str | Path,
     bbox: TablaBBox,
-    margen: float = MARGEN_DEFAULT,
+    margen: float | tuple[float, float, float, float] = MARGEN_DEFAULT,
     zoom: int = ZOOM_DEFAULT,
+    borde: int = BORDE_DEFAULT,
 ) -> Path:
-    """bbox → imagen recortada y ampliada, guardada como <nombre>_tabla.<ext>."""
+    """bbox → imagen recortada, ampliada y con borde blanco.
+
+    `margen` puede ser un número (los 4 lados iguales) o una tupla
+    (izquierda, arriba, derecha, abajo) en fracción del alto/ancho original.
+    `borde` son píxeles de blanco que se agregan alrededor después del zoom,
+    para que ningún texto quede pegado al borde de la imagen.
+    """
     ruta = Path(ruta)
     img = Image.open(ruta)
     w, h = img.size
-    x0 = max(0.0, bbox.x_min / 1000 - margen) * w
-    y0 = max(0.0, bbox.y_min / 1000 - margen) * h
-    x1 = min(1.0, bbox.x_max / 1000 + margen) * w
-    y1 = min(1.0, bbox.y_max / 1000 + margen) * h
+    m_izq, m_arr, m_der, m_aba = _margenes(margen)
+
+    x0 = max(0.0, bbox.x_min / 1000 - m_izq) * w
+    y0 = max(0.0, bbox.y_min / 1000 - m_arr) * h
+    x1 = min(1.0, bbox.x_max / 1000 + m_der) * w
+    y1 = min(1.0, bbox.y_max / 1000 + m_aba) * h
 
     crop = img.crop((x0, y0, x1, y1))
     crop = crop.resize((int((x1 - x0) * zoom), int((y1 - y0) * zoom)), Image.LANCZOS)
+    if borde:
+        crop = ImageOps.expand(crop.convert("RGB"), border=int(borde), fill="white")
 
     salida = ruta.with_stem(ruta.stem + "_tabla")
     crop.save(salida)
@@ -148,8 +174,9 @@ def recortar_zoom(
 
 def preparar_tabla(
     ruta: str | Path,
-    margen: float = MARGEN_DEFAULT,
+    margen: float | tuple[float, float, float, float] = MARGEN_DEFAULT,
     zoom: int = ZOOM_DEFAULT,
+    borde: int = BORDE_DEFAULT,
     verbose: bool = True,
 ) -> Path:
     """Paso 1 completo: imagen → llm → tabla recortada.
@@ -168,7 +195,7 @@ def preparar_tabla(
             f"[preparar_tabla] bbox ({bbox.x_min:.0f}, {bbox.y_min:.0f}) - "
             f"({bbox.x_max:.0f}, {bbox.y_max:.0f})"
         )
-    return recortar_zoom(ruta, bbox, margen=margen, zoom=zoom)
+    return recortar_zoom(ruta, bbox, margen=margen, zoom=zoom, borde=borde)
 
 
 # --------------------------------------------------------------------------
@@ -176,8 +203,15 @@ def preparar_tabla(
 # --------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=4)
-def get_ocr(lang: str = "es", unwarping: bool = True, rotacion: bool = False):
-    """Instancia de PaddleOCR cacheada (crearla es lento: carga los modelos)."""
+def get_ocr(lang: str = "es", unwarping: bool = False, rotacion: bool = False):
+    """Instancia de PaddleOCR cacheada (crearla es lento: carga los modelos).
+
+    `unwarping` viene en False a propósito. El modelo de unwarping (UVDoc) está
+    pensado para páginas enteras curvadas o arrugadas; aplicado a un recorte
+    ajustado de la tabla, deforma la imagen y le come píxeles de los bordes.
+    Eso es lo que estaba truncando el primer dígito de la columna ARTICULO.
+    Si trabajás con la factura completa y sale curvada, ahí sí puede servir.
+    """
     from paddleocr import PaddleOCR
 
     return PaddleOCR(
@@ -185,7 +219,7 @@ def get_ocr(lang: str = "es", unwarping: bool = True, rotacion: bool = False):
         text_det_unclip_ratio=2.5,
         enable_mkldnn=False,
         use_doc_orientation_classify=rotacion,   # True si la foto puede venir rotada
-        use_doc_unwarping=unwarping,             # True si la hoja está curvada
+        use_doc_unwarping=unwarping,
         use_textline_orientation=False,
     )
 
@@ -265,12 +299,66 @@ def imprimir_filas(filas: list[list[dict]]) -> None:
 
 
 # --------------------------------------------------------------------------
+# Diagnóstico
+# --------------------------------------------------------------------------
+
+def cajas_en_borde(res, ruta_img: str | Path, umbral: int = 3) -> pd.DataFrame:
+    """Cajas de texto que tocan el borde de la imagen.
+
+    Si una caja arranca a 0-3 px del borde izquierdo, es muy probable que le
+    hayan cortado el primer carácter. Sirve para confirmar el problema en vez
+    de adivinarlo.
+    """
+    w, h = Image.open(ruta_img).size
+    filas = []
+    for poly, txt in zip(res["rec_polys"], res["rec_texts"]):
+        p = np.array(poly)
+        x0, x1 = p[:, 0].min(), p[:, 0].max()
+        y0, y1 = p[:, 1].min(), p[:, 1].max()
+        toca = []
+        if x0 <= umbral:
+            toca.append("izq")
+        if y0 <= umbral:
+            toca.append("arriba")
+        if x1 >= w - umbral:
+            toca.append("der")
+        if y1 >= h - umbral:
+            toca.append("abajo")
+        if toca:
+            filas.append({"texto": txt, "toca": ",".join(toca), "x0": int(x0), "x1": int(x1)})
+    return pd.DataFrame(filas)
+
+
+def comparar_variantes(ruta: str | Path, variantes: dict[str, dict],
+                       patron: str | None = None) -> pd.DataFrame:
+    """Corre el OCR con distintas configuraciones y compara lo que lee.
+
+        comparar_variantes(img, {
+            "con unwarping": {"unwarping": True},
+            "sin unwarping": {"unwarping": False},
+        }, patron=r"\\d{4,8}")
+    """
+    import re
+
+    salida = {}
+    for nombre, kw in variantes.items():
+        res = ocr_tabla(ruta, guardar_en=None, **kw)
+        textos = list(res["rec_texts"])
+        if patron:
+            textos = [t for t in textos if re.fullmatch(patron, t)]
+        salida[nombre] = textos
+    largo = max((len(v) for v in salida.values()), default=0)
+    return pd.DataFrame({k: v + [""] * (largo - len(v)) for k, v in salida.items()})
+
+
+# --------------------------------------------------------------------------
 # Conveniencia
 # --------------------------------------------------------------------------
 
-def procesar(ruta: str | Path, margen: float = MARGEN_DEFAULT, zoom: int = ZOOM_DEFAULT):
+def procesar(ruta: str | Path, margen=MARGEN_DEFAULT, zoom: int = ZOOM_DEFAULT,
+             borde: int = BORDE_DEFAULT):
     """Corre el pipeline entero y devuelve (img_tabla, res, filas, df)."""
-    img_tabla = preparar_tabla(ruta, margen=margen, zoom=zoom)
+    img_tabla = preparar_tabla(ruta, margen=margen, zoom=zoom, borde=borde)
     res = ocr_tabla(img_tabla)
     filas = agrupar_filas(res)
     return img_tabla, res, filas, filas_a_dataframe(filas)
