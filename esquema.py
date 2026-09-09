@@ -845,11 +845,41 @@ def _nombrar_bandas(encabezado: list[dict], bandas: list[tuple[float, float]],
     candidatos.sort(key=lambda t: (-t[0], t[1]))
     mapa: dict[int, str] = {}
     usados: set[str] = set()
-    for _, _, b, campo in candidatos:
+    ganadores: set[int] = set()
+    for _, i, b, campo in candidatos:
         if b in mapa or campo in usados:
             continue
         mapa[b], _ = campo, usados.add(campo)
+        ganadores.add(i)
+
+    # Un título que compitió y perdió todas sus bandas no deja rastro en `mapa`,
+    # y es el aviso que más importa: en factura1 'Cód. Barras Cód. Prov' se
+    # queda sin columna porque el código de barras vive pegado a la descripción,
+    # y el síntoma —12 descripciones con el código de barras adelante— aparece
+    # recién al comparar contra el ground truth. Distinto de `titulos_sin_datos`,
+    # que son los que ni siquiera llegaron a competir.
+    perdedores = set(range(len(encabezado))) - ganadores
+    avisos["titulos_sin_columna"] = [
+        encabezado[i]["txt"] for i in sorted(perdedores)
+        if encabezado[i]["txt"] not in avisos["titulos_sin_datos"]]
     return mapa
+
+
+def _borde(v: float) -> str:
+    return "·" if v in (float("-inf"), float("inf")) else f"{v:.0f}"
+
+
+def _mapa_legible(limites: list[tuple[float, float]],
+                  mapa: dict[int, str]) -> dict[str, str | None]:
+    """La grilla tal como quedó: una entrada por columna, con su rango.
+
+    Con nombre de columna y no de título a propósito. Una columna puede no tener
+    título (la banda [1397,1526] de factura1) y un título puede no tener columna
+    (`codigo_barras` en esa misma factura, que vive pegado a la descripción);
+    las dos cosas se ven acá y ninguna se ve en un dict indexado por título.
+    """
+    return {f"{k} [{_borde(izq)},{_borde(der)}]": mapa.get(k)
+            for k, (izq, der) in enumerate(limites)}
 
 
 def desde_filas(filas: list[list[dict]], modo: str = "x",
@@ -867,11 +897,18 @@ def desde_filas(filas: list[list[dict]], modo: str = "x",
 
     Devuelve (doc, avisos). El doc trae sólo items: el recorte que produce el
     pipeline contiene la tabla, no la cabecera de la factura.
+
+    Sobre los dos mapas que salen en los avisos: `mapa_alias` es lo que el
+    vocabulario dedujo mirando sólo los títulos, y `mapa` es la grilla que de
+    verdad se usó para repartir las cajas. Casi nunca son iguales, y la que
+    importa es la segunda.
     """
     doc = documento_vacio()
-    avisos = {"encabezado": None, "mapa": {}, "sin_nombre": [],
-              "descartadas": [], "conflictos": [], "titulos_sin_datos": [],
-              "columnas_sin_titulo": [], "modo": modo, "origen_mapa": "alias"}
+    avisos = {"encabezado": None, "mapa": {}, "mapa_alias": {},
+              "sin_nombre": [], "descartadas": [], "conflictos": [],
+              "titulos_sin_datos": [], "titulos_partidos": [],
+              "titulos_sin_columna": [], "columnas_sin_titulo": [],
+              "modo": modo, "origen_mapa": "alias"}
 
     idx, mapa, punt = elegir_encabezado(filas)
     if mapa_forzado is not None:
@@ -883,11 +920,10 @@ def desde_filas(filas: list[list[dict]], modo: str = "x",
 
     encabezado = sorted(filas[idx], key=_x0)
     avisos["encabezado"] = [c["txt"] for c in encabezado]
-    avisos["mapa"] = {encabezado[i]["txt"]: campo for i, campo in mapa.items()
-                      if i < len(encabezado)}
+    avisos["mapa_alias"] = {encabezado[i]["txt"]: campo
+                            for i, campo in mapa.items() if i < len(encabezado)}
     avisos["sin_nombre"] = [c["txt"] for i, c in enumerate(encabezado)
                             if i not in mapa]
-    avisos["esenciales"] = sorted(set(mapa.values()) & set(CAMPOS_ESENCIALES))
 
     filas_datos = filas[idx + 1:]
 
@@ -902,6 +938,13 @@ def desde_filas(filas: list[list[dict]], modo: str = "x",
     else:
         limites = _limites_columnas(encabezado)
         avisos["origen_grilla"] = "encabezado"
+
+    # Después de nombrar las bandas y no antes: `_nombrar_bandas` reemplaza el
+    # mapa del vocabulario por completo, y `esenciales` es el número con el que
+    # `estandarizar` decide si le pide ayuda al LLM. Medirlo sobre el mapa que
+    # ya se descartó es decidir sobre algo que no se usó.
+    avisos["mapa"] = _mapa_legible(limites, mapa)
+    avisos["esenciales"] = sorted(set(mapa.values()) & set(CAMPOS_ESENCIALES))
 
     for fila in filas_datos:
         if modo == "posicional":
@@ -953,7 +996,7 @@ PROMPT_ENCABEZADO = (
 def mapear_encabezado_llm(fila: list[dict], modelo: str = MODELO_TEXTO,
                           verbose: bool = True) -> dict[int, str]:
     """Encabezados → mapeo, pidiéndoselo a un LLM de texto."""
-    from pipeline import get_client          # import tardío: esquema.py solo no
+    from vision import get_client            # import tardío: esquema.py solo no
                                              # necesita openai ni paddle
     orden = sorted(fila, key=_x0)
     listado = "\n".join(f"{i}: {c['txt']}" for i, c in enumerate(orden))

@@ -1,13 +1,21 @@
 """banco.py — medición end-to-end sobre el corpus real.
 
-Levanta las salidas de OCR guardadas en `data/ocr/`, las pasa por el agrupado
-y la estandarización, y las compara contra los ground truth normalizados.
+Levanta salidas de OCR ya guardadas, las pasa por el agrupado y la
+estandarización, y las compara contra los ground truth normalizados.
 
     python3 banco.py            # resumen de las 5
     python3 banco.py factura2   # detalle de una
 
 El OCR es determinista para una imagen dada, así que replayear su salida
 guardada equivale a correrlo, y cuesta cero llamadas y cero GPU.
+
+CUIDADO con qué corrida se mide: `data/ocr/` (dentro del repo, pero ignorada por
+git) es la corrida VIEJA, de antes del enderezado. Lee mejor a nivel carácter
+—importe de factura2 0.523 contra 0.432, cantidad de factura6 1.0 contra 0.333—
+pero no es lo que produce el pipeline de hoy, que endereza por default. La
+corrida que sí corresponde es `respuestaGenerada1`, y por eso es el default de
+`DIR_OCR` aunque viva afuera del repo. Cambiar ese default por la carpeta de
+adentro haría que el banco midiera en silencio un pipeline que ya no existe.
 """
 
 from __future__ import annotations
@@ -20,7 +28,7 @@ import pandas as pd
 
 from esquema import (CAMPOS_ESENCIALES, EXCLUIDAS_ITEMS, comparar_items,
                      desde_filas, desde_ground_truth, validar_aritmetica)
-from pipeline import agrupar_filas, cargar_ocr_json
+from pipeline import agrupar_filas, cargar_ocr_json, imprimir_avisos
 
 # Las salidas de OCR viven afuera del repo, una carpeta por corrida
 # (`respuestaGenerada1`, y las que vengan). Las variables de entorno permiten
@@ -67,22 +75,8 @@ def resumen(modo: str = "x") -> pd.DataFrame:
 def detalle(nombre: str, modo: str = "x") -> None:
     filas, doc, avisos, truth = procesar(nombre, modo=modo)
     print(f"=== {nombre} — {len(filas)} filas de OCR, modo '{modo}'\n")
-    print("encabezado leído:", avisos["encabezado"])
-    print("mapeo:", avisos["mapa"])
-    if avisos["sin_nombre"]:
-        print("columnas sin nombre:", avisos["sin_nombre"])
+    imprimir_avisos(avisos)
     print(f"\nitems: {len(doc['items'])} (ground truth: {len(truth['items'])})")
-
-    if avisos["conflictos"]:
-        print(f"\nfilas con celdas dobles (síntoma de fusión): "
-              f"{len(avisos['conflictos'])}")
-        for c in avisos["conflictos"][:8]:
-            print("  fila", c["fila"], "->", "; ".join(c["detalle"]))
-
-    if avisos["descartadas"]:
-        print(f"\ndescartadas ({len(avisos['descartadas'])}):")
-        for d in avisos["descartadas"][:8]:
-            print("  ", d[:140])
 
     v = validar_aritmetica(doc)
     if len(v):
