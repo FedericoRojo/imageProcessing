@@ -3,6 +3,8 @@ data/*
 !data/.gitkeep
 output/
 output_table/
+recortes/
+recortes.zip
 *_tabla.jpeg
 *_tabla.jpg
 *_tabla.png

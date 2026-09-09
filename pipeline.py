@@ -12,10 +12,13 @@ Uso típico:
 
     from pipeline import preparar_tabla, ocr_tabla, agrupar_filas, filas_a_dataframe
 
-    img_tabla = preparar_tabla("factura2.jpeg")
+    img_tabla = preparar_tabla("factura2.jpeg")   # deja el recorte en recortes/
     res       = ocr_tabla(img_tabla)
     filas     = agrupar_filas(res)
     df        = filas_a_dataframe(filas)
+
+Los recortes del paso 1 quedan guardados en `recortes/`. `descargar_recortes()`
+se los lleva a tu máquina (en Colab dispara la descarga, zipeando si hay varios).
 
 Por qué hay un paso de enderezado
 ---------------------------------
@@ -61,6 +64,11 @@ BASE_URL = "https://integrate.api.nvidia.com/v1"
 MARGEN_DEFAULT = 0.02   # % del alto/ancho que se agrega alrededor del bbox
 ZOOM_DEFAULT = 2        # factor de ampliación del recorte
 BORDE_DEFAULT = 30      # px de borde blanco agregados DESPUÉS del zoom
+
+# Los recortes van todos a una carpeta en vez de quedar sueltos al lado de la
+# imagen original: en Colab /content se llena de intermedios y bajarlos uno por
+# uno es incómodo. Con la carpeta, `descargar_recortes()` se los lleva todos.
+RECORTES_DIR = Path("recortes")
 
 # Inclinación: pendiente (px de y por px de x), no grados. 0.045 son ~2.6°.
 # Más que eso ya no es una tabla inclinada sino una foto torcida, y eso lo
@@ -473,6 +481,25 @@ def enderezar(img: Image.Image, b: float | None = None,
     return salida, b
 
 
+def _ruta_recorte(origen: Path, guardar_en: str | Path | None) -> Path:
+    """Dónde escribir el recorte: `<guardar_en>/<nombre>_tabla.png`.
+
+    Del nombre se saca el sufijo `_derecha` que agrega `normalizar_orientacion`:
+    lo que se descarga es el recorte de tal factura, no interesa por cuántos
+    pasos intermedios pasó. `guardar_en=None` lo deja al lado de la imagen
+    original, que es como se guardaba antes.
+    """
+    nombre = origen.stem
+    if nombre.endswith("_derecha"):
+        nombre = nombre[: -len("_derecha")]
+    nombre += "_tabla.png"
+    if guardar_en is None:
+        return origen.with_name(nombre)
+    carpeta = Path(guardar_en)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta / nombre
+
+
 def recortar_zoom(
     ruta: str | Path,
     bbox: TablaBBox,
@@ -480,6 +507,7 @@ def recortar_zoom(
     zoom: int = ZOOM_DEFAULT,
     borde: int = BORDE_DEFAULT,
     enderezado: bool = True,
+    guardar_en: str | Path | None = RECORTES_DIR,
     verbose: bool = True,
 ) -> Path:
     """bbox → imagen recortada, enderezada, ampliada y con borde blanco.
@@ -490,6 +518,8 @@ def recortar_zoom(
     para que ningún texto quede pegado al borde de la imagen.
     `enderezado=False` saltea la corrección de inclinación, para poder medir
     contra la línea de base con `comparar_variantes`.
+    `guardar_en` es la carpeta donde queda el recorte; `None` lo deja al lado de
+    la imagen original. Reprocesar la misma factura pisa el archivo anterior.
     """
     ruta = Path(ruta)
     img = Image.open(ruta)
@@ -511,8 +541,10 @@ def recortar_zoom(
 
     # PNG y no JPEG: es una imagen intermedia y recomprimir en JPEG le agrega
     # ruido justo en los bordes de los caracteres, que es lo que lee el OCR.
-    salida = ruta.with_name(ruta.stem + "_tabla.png")
+    salida = _ruta_recorte(ruta, guardar_en)
     crop.save(salida)
+    if verbose:
+        print(f"[recortar_zoom] recorte guardado en {salida}")
     return salida
 
 
@@ -523,9 +555,13 @@ def preparar_tabla(
     borde: int = BORDE_DEFAULT,
     rotacion: int = 0,
     enderezado: bool = True,
+    guardar_en: str | Path | None = RECORTES_DIR,
     verbose: bool = True,
 ) -> Path:
     """Paso 1 completo: imagen → orientación → llm → recorte enderezado.
+
+    El recorte queda en `guardar_en` (por defecto `recortes/`), listo para
+    revisarlo o bajarlo con `descargar_recortes()`.
 
     Si el LLM no encuentra la tabla, devuelve la imagen original para que el
     pipeline siga funcionando igual. En ese caso tampoco se endereza: sin
@@ -545,7 +581,8 @@ def preparar_tabla(
             f"({bbox.x_max:.0f}, {bbox.y_max:.0f})"
         )
     return recortar_zoom(ruta, bbox, margen=margen, zoom=zoom, borde=borde,
-                         enderezado=enderezado, verbose=verbose)
+                         enderezado=enderezado, guardar_en=guardar_en,
+                         verbose=verbose)
 
 
 # --------------------------------------------------------------------------
@@ -855,7 +892,8 @@ def comparar_variantes(ruta: str | Path, variantes: dict[str, dict],
 
 def procesar(ruta: str | Path, margen=MARGEN_DEFAULT, zoom: int = ZOOM_DEFAULT,
              borde: int = BORDE_DEFAULT, rotacion: int = 0,
-             enderezado: bool = True, verbose: bool = True, **kw_ocr):
+             enderezado: bool = True, guardar_en: str | Path | None = RECORTES_DIR,
+             verbose: bool = True, **kw_ocr):
     """Corre el pipeline entero y devuelve (img_tabla, res, filas, df).
 
     `kw_ocr` va a `get_ocr` (unwarping, unclip, lang), para poder correr una
@@ -863,10 +901,55 @@ def procesar(ruta: str | Path, margen=MARGEN_DEFAULT, zoom: int = ZOOM_DEFAULT,
     """
     img_tabla = preparar_tabla(ruta, margen=margen, zoom=zoom, borde=borde,
                                rotacion=rotacion, enderezado=enderezado,
-                               verbose=verbose)
+                               guardar_en=guardar_en, verbose=verbose)
     res = ocr_tabla(img_tabla, **kw_ocr)
     filas = agrupar_filas(res, verbose=verbose)
     return img_tabla, res, filas, filas_a_dataframe(filas)
+
+
+def listar_recortes(carpeta: str | Path = RECORTES_DIR) -> list[Path]:
+    """Los recortes que hay guardados, del más nuevo al más viejo."""
+    carpeta = Path(carpeta)
+    if not carpeta.is_dir():
+        return []
+    return sorted(carpeta.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def descargar_recortes(carpeta: str | Path = RECORTES_DIR, verbose: bool = True):
+    """Se lleva los recortes a tu máquina.
+
+    En Colab dispara la descarga del navegador: si hay un solo recorte baja el
+    PNG, y si hay varios los zipea primero (Colab abre un diálogo por archivo,
+    y con diez recortes eso es insoportable). Fuera de Colab no hay nada que
+    descargar — los archivos ya están en el disco — así que sólo los lista.
+
+    Devuelve la lista de recortes.
+    """
+    carpeta = Path(carpeta)
+    recortes = listar_recortes(carpeta)
+    if not recortes:
+        if verbose:
+            print(f"[descargar] no hay recortes en {carpeta.resolve()}")
+        return []
+
+    if verbose:
+        print(f"[descargar] {len(recortes)} recorte(s) en {carpeta.resolve()}:")
+        for r in recortes:
+            print(f"   {r.name}")
+
+    try:
+        from google.colab import files      # type: ignore[import-not-found]
+    except ImportError:
+        return recortes                     # local: ya están donde tienen que estar
+
+    if len(recortes) == 1:
+        files.download(str(recortes[0]))
+    else:
+        import shutil
+
+        zip_path = shutil.make_archive(str(carpeta), "zip", root_dir=carpeta)
+        files.download(zip_path)
+    return recortes
 
 
 def cargar_ocr_json(ruta: str | Path) -> dict:

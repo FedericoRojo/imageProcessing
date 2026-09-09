@@ -21,6 +21,7 @@ sobre una imagen limpia, sin logo, datos del proveedor ni recuadro de totales.
 | `notebooks/factura_a_tabla.ipynb` | Notebook flaco: orquesta y muestra resultados. |
 | `requirements.txt` | Dependencias. |
 | `data/` | Facturas de prueba (ignoradas por git). |
+| `recortes/` | Recortes que devuelve el paso 1, para revisar o descargar (ignorada por git). |
 
 ## Flujo de trabajo
 
@@ -52,6 +53,10 @@ export NVIDIA_API_KEY=...                        # Windows: set NVIDIA_API_KEY=.
 from pipeline import procesar
 img_tabla, res, filas, df = procesar("data/factura2.jpeg")
 ```
+
+El recorte del paso 1 queda en `recortes/factura2_tabla.png`. En Colab,
+`pipeline.descargar_recortes()` baja todos los recortes de la sesión (uno solo
+como PNG, varios como `.zip`).
 
 ## Antes de commitear el notebook
 
