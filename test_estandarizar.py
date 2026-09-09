@@ -195,7 +195,7 @@ def prueba_factura1():
 def prueba_comparacion():
     print("\ncomparación contra el ground truth de factura2")
     doc_p, _ = desde_filas(FILAS_F2)
-    doc_t, _ = desde_ground_truth("../imagenes/factura2.json")
+    doc_t, _ = desde_ground_truth("../imagenes/respuestaEsperada/factura2.json")
     r = comparar_items(doc_p, doc_t)
     print(r["resumen"].to_string(index=False))
     check("empareja las 3 por código", r["emparejados"] == 3, r["emparejados"])

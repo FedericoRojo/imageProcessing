@@ -12,6 +12,7 @@ guardada equivale a correrlo, y cuesta cero llamadas y cero GPU.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,8 +22,13 @@ from esquema import (CAMPOS_ESENCIALES, EXCLUIDAS_ITEMS, comparar_items,
                      desde_filas, desde_ground_truth, validar_aritmetica)
 from pipeline import agrupar_filas, cargar_ocr_json
 
-DIR_OCR = Path("data/ocr")
-DIR_GT = Path("../imagenes")
+# Las salidas de OCR viven afuera del repo, una carpeta por corrida
+# (`respuestaGenerada1`, y las que vengan). Las variables de entorno permiten
+# medir una corrida vieja contra el mismo ground truth sin tocar el código:
+#
+#     DIR_OCR=../imagenes/respuetaGenerada python3 banco.py
+DIR_OCR = Path(os.environ.get("DIR_OCR", "../imagenes/respuestaGenerada1"))
+DIR_GT = Path(os.environ.get("DIR_GT", "../imagenes/respuestaEsperada"))
 
 
 def facturas() -> list[str]:
