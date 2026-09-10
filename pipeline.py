@@ -76,7 +76,7 @@ import esquema
 __all__ = [
     # orquestación y fachada del paso 5 (definidos en este archivo)
     "preparar_tabla", "procesar", "estandarizar", "items_a_dataframe",
-    "validar_aritmetica", "imprimir_avisos",
+    "guardar_doc", "validar_aritmetica", "imprimir_avisos",
     # vision.py
     "TablaBBox", "detectar_tabla", "get_client",
     "MODELO_VISION", "BASE_URL", "PROMPT_BBOX",
@@ -169,6 +169,15 @@ def items_a_dataframe(doc: dict) -> pd.DataFrame:
     devuelvan tablas de forma distinta.
     """
     return esquema.items_a_dataframe(doc)
+
+
+def guardar_doc(doc: dict, ruta: str | Path) -> Path:
+    """El doc del paso 5 a un .json, para mirarlo fuera de la sesión.
+
+    `banco.py` lo escribe solo para las cinco facturas del corpus; esto es para
+    cuando corrés una imagen suelta desde el notebook.
+    """
+    return esquema.guardar_doc(doc, ruta)
 
 
 def validar_aritmetica(doc: dict, tol_rel: float = 0.01) -> pd.DataFrame:

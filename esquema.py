@@ -543,6 +543,25 @@ def items_a_dataframe(doc: dict) -> pd.DataFrame:
     return pd.DataFrame(doc["items"], columns=CAMPOS_ITEM)
 
 
+def guardar_doc(doc: dict, ruta: str | Path) -> Path:
+    """El documento canónico a un .json, para poder mirarlo y diffearlo.
+
+    Hasta acá la salida del paso 5 vivía sólo en memoria: `banco.py` la medía,
+    imprimía el resumen y la tiraba. Eso alcanza para saber QUÉ porcentaje sale
+    bien, pero no para ver qué cambió entre dos versiones del código sin volver
+    a correr todo — y el OCR es la parte cara.
+
+    Se guarda en la forma canónica y no en la del ground truth original: la
+    comparación que vale es contra el `desde_ground_truth` ya normalizado, que
+    es la única que no mide la variación de quien cargó el JSON a mano.
+    """
+    ruta = Path(ruta)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    return ruta
+
+
 # --------------------------------------------------------------------------
 # Estandarización: filas del pipeline → items canónicos
 # --------------------------------------------------------------------------

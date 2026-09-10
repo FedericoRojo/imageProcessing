@@ -27,7 +27,8 @@ from pathlib import Path
 import pandas as pd
 
 from esquema import (CAMPOS_ESENCIALES, EXCLUIDAS_ITEMS, comparar_items,
-                     desde_filas, desde_ground_truth, validar_aritmetica)
+                     desde_filas, desde_ground_truth, guardar_doc,
+                     validar_aritmetica)
 from pipeline import agrupar_filas, cargar_ocr_json, imprimir_avisos
 
 # Las salidas de OCR viven afuera del repo, una carpeta por corrida
@@ -38,24 +39,32 @@ from pipeline import agrupar_filas, cargar_ocr_json, imprimir_avisos
 DIR_OCR = Path(os.environ.get("DIR_OCR", "../imagenes/respuestaGenerada1"))
 DIR_GT = Path(os.environ.get("DIR_GT", "../imagenes/respuestaEsperada"))
 
+# Dónde queda la salida del paso 5. Va al lado de las otras dos y no adentro
+# del repo: son los mismos datos de facturas reales que ya viven afuera, y
+# tenerlos en dos lugares distintos es la forma segura de que uno se versione
+# por accidente.
+DIR_SALIDA = Path(os.environ.get("DIR_SALIDA", "../imagenes/respuestaPipeline"))
+
 
 def facturas() -> list[str]:
     nombres = sorted(p.name.split("_")[0] for p in DIR_OCR.glob("*_res.json"))
     return [n for n in nombres if n not in EXCLUIDAS_ITEMS]
 
 
-def procesar(nombre: str, modo: str = "x"):
+def procesar(nombre: str, modo: str = "x", guardar_en: Path | None = None):
     res = cargar_ocr_json(DIR_OCR / f"{nombre}_tabla_res.json")
     filas = agrupar_filas(res)
     doc, avisos = desde_filas(filas, modo=modo)
     truth, _ = desde_ground_truth(DIR_GT / f"{nombre}.json")
+    if guardar_en is not None:
+        guardar_doc(doc, Path(guardar_en) / f"{nombre}.json")
     return filas, doc, avisos, truth
 
 
-def resumen(modo: str = "x") -> pd.DataFrame:
+def resumen(modo: str = "x", guardar_en: Path | None = None) -> pd.DataFrame:
     out = []
     for n in facturas():
-        filas, doc, avisos, truth = procesar(n, modo=modo)
+        filas, doc, avisos, truth = procesar(n, modo=modo, guardar_en=guardar_en)
         r = comparar_items(doc, truth)
         v = validar_aritmetica(doc)
         fila = {"factura": n, "filas_ocr": len(filas),
@@ -72,8 +81,8 @@ def resumen(modo: str = "x") -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def detalle(nombre: str, modo: str = "x") -> None:
-    filas, doc, avisos, truth = procesar(nombre, modo=modo)
+def detalle(nombre: str, modo: str = "x", guardar_en: Path | None = None) -> None:
+    filas, doc, avisos, truth = procesar(nombre, modo=modo, guardar_en=guardar_en)
     print(f"=== {nombre} — {len(filas)} filas de OCR, modo '{modo}'\n")
     imprimir_avisos(avisos)
     print(f"\nitems: {len(doc['items'])} (ground truth: {len(truth['items'])})")
@@ -95,10 +104,15 @@ def detalle(nombre: str, modo: str = "x") -> None:
 if __name__ == "__main__":
     pd.set_option("display.width", 200)
     pd.set_option("display.max_columns", 40)
+    # Sólo el modo "x" escribe: el posicional es la línea de base y guardarlo
+    # pisaría la salida real con la que existe para quedar peor.
     if len(sys.argv) > 1:
-        detalle(sys.argv[1], modo=sys.argv[2] if len(sys.argv) > 2 else "x")
+        modo = sys.argv[2] if len(sys.argv) > 2 else "x"
+        detalle(sys.argv[1], modo=modo,
+                guardar_en=DIR_SALIDA if modo == "x" else None)
     else:
         print("modo x (asignación por superposición con la franja de columna)")
-        print(resumen("x").to_string(index=False))
+        print(resumen("x", guardar_en=DIR_SALIDA).to_string(index=False))
         print("\nmodo posicional (línea de base)")
         print(resumen("posicional").to_string(index=False))
+    print(f"\nsalida del paso 5 en {DIR_SALIDA}/")

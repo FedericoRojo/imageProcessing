@@ -5,6 +5,11 @@ output/
 output_table/
 recortes/
 recortes.zip
+
+# salida del paso 5 (docs canónicos): datos de facturas reales, igual que el
+# ground truth, que vive afuera del repo a propósito
+respuestaGenera/
+respuestaGenera.zip
 *_tabla.jpeg
 *_tabla.jpg
 *_tabla.png
