@@ -126,6 +126,13 @@ def _num(v):
     uno solo, es de miles únicamente si separa grupos exactos de tres dígitos
     (`1.234` → 1234); si no, es decimal (`450,00` → 450.0).
 
+    El mismo criterio aplica cuando el separador repetido es el MISMO
+    carácter: `17,311,55` (factura1, debería ser `17.311,55`) o `3.742.45`
+    (debería ser `3.742,45`) son casos donde el OCR imprime el separador de
+    miles y el decimal con el mismo glifo. El último es igual el decimal;
+    exigir grupos de tres dígitos ahí adentro (como hace el chequeo de
+    "es de miles a secas") descarta el número entero en vez de rescatarlo.
+
     Lección para la tesis: el formato numérico que sale del OCR no es el que
     está impreso en el papel, y un parser que confía en la convención local
     produce errores silenciosos de tres órdenes de magnitud.
@@ -144,8 +151,14 @@ def _num(v):
         decimal = "." if s.rfind(".") > s.rfind(",") else ","
         miles = "," if decimal == "." else "."
         s = s.replace(miles, "").replace(decimal, ".")
+    elif tiene_coma and s.count(",") > 1:
+        cabeza, _, cola = s.rpartition(",")
+        s = cabeza.replace(",", "") + "." + cola
     elif tiene_coma:
         s = s.replace(",", "") if _MILES_COMA.match(s) else s.replace(",", ".")
+    elif tiene_punto and s.count(".") > 1:
+        cabeza, _, cola = s.rpartition(".")
+        s = cabeza.replace(".", "") + "." + cola
     elif tiene_punto and _MILES_PUNTO.match(s):
         s = s.replace(".", "")
 
@@ -685,6 +698,15 @@ def _subdividir_bandas(bandas: list[tuple[float, float]],
     corte sea CONSISTENTE (desvío chico frente al ancho de la banda) es la que
     evita partir una descripción que el OCR corta en dos pedazos cada vez en un
     lugar distinto.
+
+    El "casi todas" se mide contra las filas que traen evidencia (2+ cajas
+    dentro de la banda), no contra todas las que caen dentro de la banda. Una
+    fila donde el OCR pegó las dos columnas en una sola caja no vota en contra
+    del corte: no vota nada, porque no hay corte que medir ahí. Contarla en el
+    denominador castiga al corte por un error de OCR ajeno a si la columna
+    existe. En factura1 esto hundía el corte código/descripción por 0.4 filas
+    (8 de 12) a pesar de que las 8 filas que sí podían opinar coincidían con
+    2.5px de desvío contra un margen de 27.85px.
     """
     salida: list[tuple[float, float]] = []
     for izq, der in bandas:
@@ -704,7 +726,7 @@ def _subdividir_bandas(bandas: list[tuple[float, float]],
             continue
         k = max(set(conteos), key=conteos.count)
         utiles = [c for c in cortes if len(c) == k - 1]
-        if k < 2 or len(utiles) < min_frac * len(conteos):
+        if k < 2 or len(utiles) < min_frac * len(cortes):
             salida.append((izq, der))
             continue
 
